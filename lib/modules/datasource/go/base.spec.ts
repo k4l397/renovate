@@ -540,6 +540,89 @@ describe('modules/datasource/go/base', () => {
           registryUrl: 'https://example.com/gitlab/',
         });
       });
+
+      describe('GitLab authentication enhancement', () => {
+        it('applies Basic Auth for GitLab hosts when token is available', async () => {
+          // Mock hostRules to return a GitLab token
+          hostRules.find
+            .mockReturnValueOnce({}) // First call for go hostType
+            .mockReturnValueOnce({ token: 'gitlab-token-123' }) // Second call for gitlab hostType
+            .mockReturnValueOnce({}); // Third call for general hostType
+
+          const meta =
+            '<meta name="go-import" content="gitlab.example.com/group/project git https://gitlab.example.com/group/project.git" />';
+
+          httpMock
+            .scope('https://gitlab.example.com')
+            .get('/group/project?go-get=1')
+            .matchHeader(
+              'authorization',
+              'Basic Z2l0bGFiLWNpLXRva2VuOmdpdGxhYi10b2tlbi0xMjM=',
+            ) // Base64 of gitlab-ci-token:gitlab-token-123
+            .reply(200, meta);
+
+          const res = await BaseGoDatasource.getDatasource(
+            'gitlab.example.com/group/project',
+          );
+
+          expect(res).toEqual({
+            datasource: GitlabTagsDatasource.id,
+            packageName: 'group/project',
+            registryUrl: 'https://gitlab.example.com',
+          });
+        });
+
+        it('uses existing go hostType rules when available', async () => {
+          // Mock hostRules to return go hostType credentials
+          hostRules.find.mockReturnValueOnce({
+            username: 'custom-user',
+            password: 'custom-token',
+          });
+
+          const meta =
+            '<meta name="go-import" content="gitlab.example.com/group/project git https://gitlab.example.com/group/project.git" />';
+
+          httpMock
+            .scope('https://gitlab.example.com')
+            .get('/group/project?go-get=1')
+            .matchHeader(
+              'authorization',
+              'Basic Y3VzdG9tLXVzZXI6Y3VzdG9tLXRva2Vu',
+            ) // Base64 of custom-user:custom-token
+            .reply(200, meta);
+
+          const res = await BaseGoDatasource.getDatasource(
+            'gitlab.example.com/group/project',
+          );
+
+          expect(res).toEqual({
+            datasource: GitlabTagsDatasource.id,
+            packageName: 'group/project',
+            registryUrl: 'https://gitlab.example.com',
+          });
+        });
+
+        it('works for non-GitLab hosts without authentication', async () => {
+          hostRules.find.mockReturnValue({});
+
+          const meta =
+            '<meta name="go-import" content="git.example.com/group/project git https://git.example.com/group/project.git" />';
+
+          httpMock
+            .scope('https://git.example.com')
+            .get('/group/project?go-get=1')
+            .reply(200, meta);
+
+          const res = await BaseGoDatasource.getDatasource(
+            'git.example.com/group/project',
+          );
+
+          expect(res).toEqual({
+            datasource: GitTagsDatasource.id,
+            packageName: 'https://git.example.com/group/project.git',
+          });
+        });
+      });
     });
   });
 });

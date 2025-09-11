@@ -4,6 +4,7 @@ import { logger } from '../../../logger';
 import { detectPlatform } from '../../../util/common';
 import * as hostRules from '../../../util/host-rules';
 import { Http } from '../../../util/http';
+import type { HttpOptions } from '../../../util/http/types';
 import { regEx } from '../../../util/regex';
 import {
   parseUrl,
@@ -136,7 +137,13 @@ export class BaseGoDatasource {
   ): Promise<DataSource | null> {
     const goModuleUrl = goModule.replace(/\.git(\/[a-z0-9/]*)?$/, '');
     const pkgUrl = `https://${goModuleUrl}?go-get=1`;
-    const { body: html } = await BaseGoDatasource.http.getText(pkgUrl);
+
+    // Apply GitLab authentication if available
+    const httpOptions = BaseGoDatasource.getGoGetHttpOptions(pkgUrl);
+    const { body: html } = await BaseGoDatasource.http.getText(
+      pkgUrl,
+      httpOptions,
+    );
 
     const goSourceHeader = BaseGoDatasource.goSourceHeader(html, goModule);
     if (goSourceHeader) {
@@ -151,6 +158,97 @@ export class BaseGoDatasource {
 
     logger.trace({ goModule }, 'No go-source or go-import header found');
     return null;
+  }
+
+  private static getGoGetHttpOptions(url: string): HttpOptions {
+    const parsedUrl = parseUrl(url);
+    if (!parsedUrl?.hostname) {
+      return {};
+    }
+
+    // Check if this is a GitLab instance and we have credentials
+    const gitlabAuth = BaseGoDatasource.getGitLabBasicAuth(parsedUrl.hostname);
+    if (gitlabAuth) {
+      logger.debug(
+        `Applying GitLab Basic Auth for go-get request to ${parsedUrl.hostname}`,
+      );
+      return {
+        username: gitlabAuth.username,
+        password: gitlabAuth.password,
+      };
+    }
+
+    return {};
+  }
+
+  private static getGitLabBasicAuth(
+    hostname: string,
+  ): { username: string; password: string } | null {
+    // First, check if we have explicit go hostType rules (existing behavior)
+    const goHostRule = hostRules.find({
+      url: `https://${hostname}`,
+      hostType: 'go',
+    });
+    if (goHostRule.username && goHostRule.password) {
+      return {
+        username: goHostRule.username,
+        password: goHostRule.password,
+      };
+    }
+
+    // Look for GitLab credentials to convert to Basic Auth
+    const gitlabHostRule = hostRules.find({
+      url: `https://${hostname}`,
+      hostType: 'gitlab',
+    });
+
+    if (gitlabHostRule.token) {
+      // Convert GitLab token to Basic Auth format
+      return {
+        username: 'gitlab-ci-token',
+        password: gitlabHostRule.token,
+      };
+    }
+
+    // Check if global platform is GitLab and matches this hostname
+    const globalConfig = GlobalConfig.get();
+    if (globalConfig.platform === 'gitlab') {
+      const globalEndpoint = globalConfig.endpoint;
+      if (globalEndpoint) {
+        const globalHostname = parseUrl(globalEndpoint)?.hostname;
+        if (globalHostname === hostname) {
+          // We're on the same GitLab instance as the global platform
+          // Try to get token from general hostRules for this host
+          const generalHostRule = hostRules.find({
+            url: `https://${hostname}`,
+          });
+          if (generalHostRule.token) {
+            return {
+              username: 'gitlab-ci-token',
+              password: generalHostRule.token,
+            };
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private static isGitLabHost(hostname: string): boolean {
+    // Check if hostname contains 'gitlab'
+    if (hostname.toLowerCase().includes('gitlab')) {
+      return true;
+    }
+
+    // Check if we have hostRules configured for this host with GitLab hostType
+    const hostRule = hostRules.find({
+      url: `https://${hostname}`,
+      hostType: 'gitlab',
+    });
+
+    // If we found a rule with the gitlab hostType filter, it means this is a GitLab host
+    return !!(hostRule.token ?? hostRule.username ?? hostRule.password);
   }
 
   private static goSourceHeader(
